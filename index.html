@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>繰り上がり足し算チャレンジ</title>
+    <!-- Tailwind CSS CDNの読み込み -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Interフォントの設定 -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f7;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start; /* 上部に寄せる */
+            min-height: 100vh;
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+    </style>
+</head>
+<body class="bg-gray-50">
+
+    <div id="app" class="w-full max-w-lg mx-4 bg-white p-6 md:p-10 rounded-xl shadow-2xl border border-blue-100">
+        <h1 class="text-3xl font-bold text-center text-blue-600 mb-6">
+            <span class="mr-2">➕</span> 繰り上がり足し算チャレンジ
+        </h1>
+
+        <!-- ユーザー情報表示エリア -->
+        <div id="userInfoDisplay" class="text-sm text-gray-600 text-center mb-4">
+            <p id="authStatus" class="text-xs text-red-500 mb-1">認証中...</p>
+            <p id="currentHandleName" class="text-base font-semibold text-gray-800 hidden">
+                ようこそ: <span class="text-blue-600" id="displayHandleName"></span>
+            </p>
+            <p id="currentUserId" class="text-xs mt-1 hidden">
+                ユーザーID: <span class="font-mono text-gray-500 text-[10px]" id="displayUserId"></span>
+            </p>
+        </div>
+
+        <!-- 画面コンテナ -->
+        <div id="screenContainer">
+            <!-- 各画面はJavaScriptで切り替える -->
+        </div>
+    </div>
+
+    <!-- Firebase SDKの読み込み -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, addDoc, collection, query, where, getDocs, Timestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // デバッグログを有効にする
+        setLogLevel('Debug');
+
+        // グローバル変数の定義と初期化
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth;
+        let userId = null;
+        let handleName = null;
+        let isAuthReady = false;
+
+        // UI要素の取得
+        const screenContainer = document.getElementById('screenContainer');
+        const authStatusElement = document.getElementById('authStatus');
+        const displayHandleNameElement = document.getElementById('displayHandleName');
+        const displayUserIdElement = document.getElementById('displayUserId');
+        const currentHandleNameElement = document.getElementById('currentHandleName');
+        const currentUserIdElement = document.getElementById('currentUserId');
+
+        // アプリの状態
+        let startTime;
+        let timerInterval;
+        let currentQuestionIndex = 0;
+        let questions = [];
+        let records = []; // 個人ベスト・デイリーベストの計算用
+
+        // Firestoreのパス定義
+        const USER_PROFILE_COLLECTION = 'user_profile';
+        const USER_PROFILE_DOC_ID = 'settings';
+        const PUBLIC_RECORDS_COLLECTION = 'addition_records';
+
+        // --- 1. Firebase初期化と認証 ---
+        async function initializeFirebase() {
+            if (!firebaseConfig) {
+                console.error("Firebase config is missing.");
+                authStatusElement.textContent = "エラー: Firebase設定がありません";
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                authStatusElement.textContent = "認証中...";
+
+                // 認証トークンがあれば使用し、なければ匿名認証
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // 認証状態の監視
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        displayUserIdElement.textContent = userId;
+                        currentUserIdElement.classList.remove('hidden');
+
+                        // ユーザープロファイル（ハンドルネーム）を読み込む
+                        await loadUserProfile();
+
+                        authStatusElement.textContent = "認証完了";
+                        authStatusElement.classList.add('hidden');
+                        isAuthReady = true;
+
+                        if (handleName) {
+                            currentHandleNameElement.classList.remove('hidden');
+                            displayScreen(Screen.HOME);
+                            // 記録の読み込み
+                            loadRecordsAndDisplay();
+                        } else {
+                            displayScreen(Screen.REGISTER);
+                        }
+
+                    } else {
+                        userId = null;
+                        handleName = null;
+                        isAuthReady = true;
+                        authStatusElement.textContent = "未認証ユーザーとして動作中";
+                        displayScreen(Screen.REGISTER);
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase初期化または認証エラー:", error);
+                authStatusElement.textContent = `認証エラー: ${error.code}`;
+            }
+        }
+
+        // --- 2. 画面切り替えとUI描画 ---
+        const Screen = {
+            REGISTER: 'register',
+            HOME: 'home',
+            PRACTICE: 'practice',
+            RESULT: 'result'
+        };
+
+        function displayScreen(screenName, data = null) {
+            screenContainer.innerHTML = '';
+            switch (screenName) {
+                case Screen.REGISTER:
+                    renderRegisterScreen();
+                    break;
+                case Screen.HOME:
+                    renderHomeScreen();
+                    break;
+                case Screen.PRACTICE:
+                    renderPracticeScreen();
+                    break;
+                case Screen.RESULT:
+                    renderResultScreen(data);
+                    break;
+            }
+        }
+
+        // --- 3. Firestoreデータ操作 (Handle Name) ---
+
+        // プライベートな設定ドキュメントの参照を取得
+        function getUserProfileDocRef(uid) {
+            return doc(db, 'artifacts', appId, 'users', uid, USER_PROFILE_COLLECTION, USER_PROFILE_DOC_ID);
+        }
+
+        // ハンドルネームの読み込み
+        async function loadUserProfile() {
+            if (!userId) return;
+            try {
+                const docRef = getUserProfileDocRef(userId);
+                const docSnap = await getDoc(docRef);
+                if (docSnap.exists()) {
+                    handleName = docSnap.data().handleName;
+                    displayHandleNameElement.textContent = handleName;
+                    currentHandleNameElement.classList.remove('hidden');
+                }
+            } catch (e) {
+                console.error("ハンドルネームの読み込みに失敗:", e);
+            }
+        }
+
+        // ハンドルネームの保存
+        async function saveHandleName(newHandleName) {
+            if (!userId) return;
+            try {
+                const docRef = getUserProfileDocRef(userId);
+                await setDoc(docRef, { handleName: newHandleName });
+                handleName = newHandleName;
+                displayHandleNameElement.textContent = handleName;
+                currentHandleNameElement.classList.remove('hidden');
+                displayScreen(Screen.HOME);
+                loadRecordsAndDisplay();
+            } catch (e) {
+                console.error("ハンドルネームの保存に失敗:", e);
+                showNotification("保存に失敗しました。", 'error');
+            }
+        }
+
+        // --- 4. Firestoreデータ操作 (Records) ---
+
+        // パブリックな記録コレクションの参照を取得
+        function getPublicRecordsCollectionRef() {
+            return collection(db, 'artifacts', appId, 'public', 'data', PUBLIC_RECORDS_COLLECTION);
+        }
+
+        // 新しい練習記録の保存
+        async function saveRecord(score, time) {
+            if (!isAuthReady || !userId || !handleName) return;
+
+            const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+            
+            const recordData = {
+                userId: userId,
+                handleName: handleName,
+                score: score, // 今回は常に4
+                time: parseFloat(time.toFixed(2)),
+                timestamp: Timestamp.now(),
+                date: today
+            };
+
+            try {
+                await addDoc(getPublicRecordsCollectionRef(), recordData);
+                console.log("記録を保存しました:", recordData);
+                // 記録保存後、データを再読み込み
+                await loadRecordsAndDisplay();
+                return true;
+            } catch (e) {
+                console.error("記録の保存に失敗:", e);
+                showNotification("記録の保存に失敗しました。", 'error');
+                return false;
+            }
+        }
+
+        // 記録の読み込みとベストタイムの計算
+        async function loadRecordsAndDisplay() {
+            if (!isAuthReady) return;
+            try {
+                // すべての記録を読み込む
+                const q = query(getPublicRecordsCollectionRef());
+                const querySnapshot = await getDocs(q);
+                records = [];
+                querySnapshot.forEach((doc) => {
+                    records.push(doc.data());
+                });
+
+                // ベストタイムを計算し、ホーム画面に表示を更新
+                updateBestTimesDisplay();
+
+            } catch (e) {
+                console.error("記録の読み込みに失敗:", e);
+                // 失敗してもアプリは続行
+            }
+        }
+
+        function getBestTimes() {
+            const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+            let personalBest = Infinity;
+            let dailyBest = Infinity;
+            let dailyBestUser = null;
+            
+            // 記録がない場合は初期値を返す
+            if (records.length === 0) {
+                 return { personalBest: null, dailyBest: null, dailyBestUser: null };
+            }
+
+            records.forEach(record => {
+                // 個人ベスト (自分の記録のみ)
+                if (record.userId === userId && record.time < personalBest) {
+                    personalBest = record.time;
+                }
+
+                // デイリーベスト (今日の日付の記録全体)
+                if (record.date === today && record.time < dailyBest) {
+                    dailyBest = record.time;
+                    dailyBestUser = record.handleName;
+                }
+            });
+
+            return {
+                personalBest: personalBest === Infinity ? null : personalBest,
+                dailyBest: dailyBest === Infinity ? null : dailyBest,
+                dailyBestUser: dailyBestUser
+            };
+        }
+
+        function updateBestTimesDisplay() {
+            const { personalBest, dailyBest, dailyBestUser } = getBestTimes();
+
+            const pbElement = document.getElementById('personalBestTime');
+            const dbElement = document.getElementById('dailyBestTime');
+            const dbuElement = document.getElementById('dailyBestUser');
+
+            if (pbElement) {
+                pbElement.textContent = personalBest !== null ? `${personalBest.toFixed(2)} 秒` : '---';
+            }
+            if (dbElement) {
+                dbElement.textContent = dailyBest !== null ? `${dailyBest.toFixed(2)} 秒` : '---';
+            }
+            if (dbuElement) {
+                dbuElement.textContent = dailyBestUser !== null ? ` by ${dailyBestUser}` : '';
+            }
+        }
+
+        // --- 5. 問題生成ロジック ---
+
+        /**
+         * 繰り上がりのある1桁同士の足し算問題を重複なく4問生成する
+         * @returns {Array<{a: number, b: number, answer: number}>} 4問の配列
+         */
+        function generateQuestions() {
+            const uniqueQuestions = [];
+            const allCandidates = [];
+
+            // 繰り上がりのある足し算の候補をすべて生成 (A + B >= 10)
+            for (let a = 1; a <= 9; a++) {
+                for (let b = 1; b <= 9; b++) {
+                    if (a + b >= 10) {
+                        // 順番が異なるだけの重複 (例: 7+8 と 8+7) を避けるため、A <= B のみを採用
+                        if (a <= b) {
+                            allCandidates.push({ a: a, b: b, answer: a + b });
+                        }
+                    }
+                }
+            }
+
+            // 候補数が4未満の場合はエラー（ただし、実際は4問以上ある）
+            if (allCandidates.length < 4) {
+                 // 発生しないはずだが念のため
+                 return [ {a:5, b:5, answer:10}, {a:6, b:6, answer:12}, {a:7, b:7, answer:14}, {a:8, b:8, answer:16} ];
+            }
+
+            // 候補リストをシャッフルし、最初の4問を選択
+            // Fisher-Yates (Knuth) Shuffle
+            for (let i = allCandidates.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [allCandidates[i], allCandidates[j]] = [allCandidates[j], allCandidates[i]];
+            }
+
+            // 4問をユニークな問題として選ぶ
+            const selectedPairs = allCandidates.slice(0, 4);
+            
+            // 最後に、AとBの表示順をランダムに入れ替えて、問題の見た目を多様にする
+            return selectedPairs.map(q => {
+                if (Math.random() < 0.5 && q.a !== q.b) {
+                    return { a: q.b, b: q.a, answer: q.answer };
+                }
+                return q;
+            });
+        }
+
+
+        // --- 6. タイマーとゲーム実行ロジック ---
+
+        function startTimer() {
+            startTime = performance.now();
+            const timerElement = document.getElementById('timerDisplay');
+            if (timerElement) {
+                timerElement.textContent = '0.00 秒';
+                clearInterval(timerInterval);
+                timerInterval = setInterval(() => {
+                    const elapsedTime = (performance.now() - startTime) / 1000;
+                    timerElement.textContent = `${elapsedTime.toFixed(2)} 秒`;
+                }, 10); // 10ミリ秒ごとに更新
+            }
+        }
+
+        function stopTimer() {
+            clearInterval(timerInterval);
+            const endTime = performance.now();
+            return (endTime - startTime) / 1000; // 秒を返す
+        }
+
+        function nextQuestion() {
+            const inputElement = document.getElementById('answerInput');
+            const currentQuestion = questions[currentQuestionIndex];
+            const userAnswer = parseInt(inputElement.value.trim());
+            const feedbackElement = document.getElementById('feedbackMessage');
+            
+            // 入力チェック
+            if (isNaN(userAnswer) || inputElement.value.trim() === '') {
+                 feedbackElement.textContent = '数字を入力してください！';
+                 feedbackElement.classList.remove('hidden');
+                 return;
+            }
+            feedbackElement.classList.add('hidden');
+
+            // 正誤判定
+            if (userAnswer === currentQuestion.answer) {
+                // 正解！
+                currentQuestionIndex++;
+                inputElement.value = '';
+                
+                // 4問完了のチェック
+                if (currentQuestionIndex >= 4) {
+                    const finalTime = stopTimer();
+                    const score = 4; // 常に4問正解として扱う
+                    
+                    // 結果画面へ遷移
+                    displayScreen(Screen.RESULT, { score, time: finalTime });
+
+                } else {
+                    // 次の問題へ
+                    renderPracticeQuestion();
+                }
+
+            } else {
+                // 不正解！
+                showNotification('ちがいます！もう一度考えてみてね。', 'error');
+                inputElement.value = ''; // 入力をクリア
+                inputElement.focus();
+            }
+        }
+
+        function renderPracticeQuestion() {
+            const questionElement = document.getElementById('questionText');
+            const progressElement = document.getElementById('progressText');
+            const inputElement = document.getElementById('answerInput');
+
+            if (currentQuestionIndex < questions.length) {
+                const q = questions[currentQuestionIndex];
+                questionElement.innerHTML = `<span class="text-6xl font-extrabold text-gray-900">${q.a} + ${q.b}</span> =`;
+                progressElement.textContent = `問題 ${currentQuestionIndex + 1} / 4`;
+                inputElement.focus();
+            }
+        }
+
+        // --- 7. UI描画関数 (各画面) ---
+
+        // 通知メッセージの表示
+        function showNotification(message, type = 'success') {
+            const feedback = document.getElementById('feedbackMessage');
+            if (!feedback) return;
+            feedback.textContent = message;
+            feedback.classList.remove('hidden', 'text-green-600', 'text-red-600', 'text-yellow-600');
+
+            if (type === 'error') {
+                feedback.classList.add('text-red-600');
+            } else if (type === 'warning') {
+                feedback.classList.add('text-yellow-600');
+            } else {
+                 feedback.classList.add('text-green-600');
+            }
+            setTimeout(() => {
+                feedback.classList.add('hidden');
+            }, 3000);
+        }
+
+        // 登録画面
+        function renderRegisterScreen() {
+            screenContainer.innerHTML = `
+                <div class="text-center p-4">
+                    <h2 class="text-2xl font-bold mb-4 text-blue-700">ようこそ！ハンドルネームを登録</h2>
+                    <p class="mb-6 text-gray-600">記録を保存するために、好きな名前（ハンドルネーム）を登録してください。</p>
+                    <input type="text" id="handleNameInput" placeholder="例: さんすうマスター" class="w-full p-3 border-2 border-blue-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-lg shadow-inner" maxlength="20">
+                    <button id="registerButton" class="mt-6 w-full py-3 bg-blue-500 hover:bg-blue-600 text-white font-bold rounded-lg transition duration-200 shadow-md">
+                        登録してスタート
+                    </button>
+                    <p id="feedbackMessage" class="text-red-600 mt-3 hidden"></p>
+                </div>
+            `;
+            document.getElementById('handleNameInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    document.getElementById('registerButton').click();
+                }
+            });
+            document.getElementById('registerButton').addEventListener('click', () => {
+                const input = document.getElementById('handleNameInput');
+                const name = input.value.trim();
+                if (name.length < 1) {
+                    showNotification('ハンドルネームを入力してください。', 'error');
+                    return;
+                }
+                saveHandleName(name);
+            });
+            
+            // 以前に入力があれば初期値として設定
+            if (handleName) {
+                document.getElementById('handleNameInput').value = handleName;
+            }
+        }
+
+        // ホーム画面
+        function renderHomeScreen() {
+            const { personalBest, dailyBest, dailyBestUser } = getBestTimes();
+
+            screenContainer.innerHTML = `
+                <div class="text-center p-4">
+                    <h2 class="text-2xl font-bold mb-6 text-gray-800">挑戦を待っているよ！</h2>
+                    
+                    <div class="grid grid-cols-2 gap-4 mb-8">
+                        <!-- 個人ベスト -->
+                        <div class="bg-blue-50 p-4 rounded-xl shadow-lg border-l-4 border-blue-500">
+                            <p class="text-sm font-semibold text-blue-700">🏆 個人の最高タイム</p>
+                            <p id="personalBestTime" class="text-3xl font-extrabold text-blue-900 mt-1">
+                                ${personalBest !== null ? `${personalBest.toFixed(2)} 秒` : '---'}
+                            </p>
+                        </div>
+                        <!-- デイリーベスト -->
+                        <div class="bg-yellow-50 p-4 rounded-xl shadow-lg border-l-4 border-yellow-500">
+                            <p class="text-sm font-semibold text-yellow-700">🌟 今日の最高タイム</p>
+                            <p id="dailyBestTime" class="text-3xl font-extrabold text-yellow-900 mt-1">
+                                ${dailyBest !== null ? `${dailyBest.toFixed(2)} 秒` : '---'}
+                            </p>
+                            <p id="dailyBestUser" class="text-xs text-yellow-600 mt-1">
+                                ${dailyBestUser !== null ? `by ${dailyBestUser}` : ''}
+                            </p>
+                        </div>
+                    </div>
+
+                    <button id="startButton" class="w-full py-4 bg-green-500 hover:bg-green-600 text-white text-xl font-bold rounded-xl transition duration-300 shadow-lg transform hover:scale-[1.02]">
+                        🔥 練習スタート (4問)
+                    </button>
+                    
+                    <button id="changeNameButton" class="mt-4 w-full py-2 text-sm text-gray-500 hover:text-gray-700 transition duration-200">
+                        ハンドルネームを変更
+                    </button>
+                </div>
+            `;
+            document.getElementById('startButton').addEventListener('click', () => {
+                questions = generateQuestions();
+                currentQuestionIndex = 0;
+                displayScreen(Screen.PRACTICE);
+                startTimer();
+            });
+            document.getElementById('changeNameButton').addEventListener('click', () => {
+                displayScreen(Screen.REGISTER);
+            });
+        }
+
+        // 練習画面
+        function renderPracticeScreen() {
+            screenContainer.innerHTML = `
+                <div class="text-center p-4">
+                    <p id="progressText" class="text-lg font-semibold text-blue-600 mb-6">問題 1 / 4</p>
+                    
+                    <!-- タイマー表示 -->
+                    <div class="bg-gray-100 p-3 rounded-lg shadow-inner mb-8">
+                        <p class="text-sm text-gray-500">経過時間</p>
+                        <p id="timerDisplay" class="text-4xl font-mono font-bold text-gray-800">0.00 秒</p>
+                    </div>
+
+                    <!-- 問題表示 -->
+                    <div class="flex justify-center items-center space-x-4 mb-8">
+                        <span id="questionText" class="text-6xl font-extrabold text-gray-900"></span>
+                        <input type="number" id="answerInput" class="w-28 p-4 text-4xl text-center border-4 border-blue-400 rounded-xl focus:ring-blue-600 focus:border-blue-600 shadow-lg transition duration-200" placeholder="答え" inputmode="numeric">
+                    </div>
+
+                    <button id="nextButton" class="w-full py-3 bg-blue-500 hover:bg-blue-600 text-white text-xl font-bold rounded-xl transition duration-200 shadow-md">
+                        解答をチェック
+                    </button>
+                    
+                    <p id="feedbackMessage" class="text-red-600 mt-4 text-sm font-semibold hidden"></p>
+                    
+                    <button id="stopButton" class="mt-4 py-2 text-sm text-gray-500 hover:text-red-500 transition duration-200">
+                        途中でやめる
+                    </button>
+                </div>
+            `;
+            document.getElementById('answerInput').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    document.getElementById('nextButton').click();
+                }
+            });
+            document.getElementById('nextButton').addEventListener('click', nextQuestion);
+            document.getElementById('stopButton').addEventListener('click', () => {
+                stopTimer();
+                currentQuestionIndex = 0;
+                questions = [];
+                displayScreen(Screen.HOME);
+            });
+
+            // 最初の問題を描画
+            renderPracticeQuestion();
+        }
+
+        // 結果画面
+        async function renderResultScreen({ score, time }) {
+            
+            // 記録を先に保存
+            const isSaved = await saveRecord(score, time);
+            
+            const { personalBest, dailyBest, dailyBestUser } = getBestTimes();
+            
+            // 達成状況をチェック
+            let messageTitle = 'お疲れ様でした！';
+            let messageBody = `4問を**${time.toFixed(2)}秒**でクリア！`;
+            let messageIcon = '👍';
+
+            let isPersonalBest = personalBest === null || time < personalBest;
+            // デイリーベスト更新チェック (デイリーベストの記録者が自分、かつ、現在のタイムがその日のベストと同じかより速い場合)
+            let isDailyBest = dailyBest === null || (time <= dailyBest && dailyBestUser === handleName);
+
+            // ローカルに保存されているレコードを更新し、改めてベストタイムを取得
+            // 記録保存の`await`が完了しているので、再度`getBestTimes`を呼び出して最新のベストを確認
+            const newBestTimes = getBestTimes();
+            isPersonalBest = newBestTimes.personalBest !== null && time <= newBestTimes.personalBest;
+            isDailyBest = newBestTimes.dailyBest !== null && time <= newBestTimes.dailyBest && newBestTimes.dailyBestUser === handleName;
+
+
+            if (isPersonalBest && isDailyBest) {
+                messageTitle = '🎉 Wベスト達成！おめでとう！ 🎉';
+                messageBody = `<span class="text-xl">すごすぎる！個人の最高記録と今日の最高記録を同時に更新したよ！</span>`;
+                messageIcon = '🌟👑';
+            } else if (isPersonalBest) {
+                messageTitle = '👑 自己ベスト更新！おめでとう！ 👑';
+                messageBody = `<span class="text-xl">やったね！君の今までの記録を塗り替えたよ！</span>`;
+                messageIcon = '🚀';
+            } else if (isDailyBest) {
+                messageTitle = '🏆 今日のトップスコア！ 🏆';
+                messageBody = `<span class="text-xl">クラスで一番速いタイムだよ！みんなに自慢しよう！</span>`;
+                messageIcon = '🥇';
+            }
+            
+            screenContainer.innerHTML = `
+                <div class="text-center p-6 bg-green-50 rounded-xl shadow-inner border-4 border-green-300">
+                    <div class="text-6xl mb-4">${messageIcon}</div>
+                    <h2 class="text-3xl font-extrabold mb-2 text-green-700">${messageTitle}</h2>
+                    <p class="text-lg text-gray-600 mb-6">${messageBody}</p>
+
+                    <div class="bg-white p-6 rounded-lg shadow-md border border-gray-200 inline-block">
+                        <p class="text-sm font-semibold text-gray-500">あなたのタイム</p>
+                        <p class="text-5xl font-extrabold text-green-600">${time.toFixed(2)} 秒</p>
+                        <p class="text-lg text-gray-700 mt-2">正答数: ${score} / 4 問</p>
+                    </div>
+
+                    <button id="backToHomeButton" class="mt-8 w-full py-3 bg-blue-500 hover:bg-blue-600 text-white text-lg font-bold rounded-xl transition duration-200 shadow-lg">
+                        ホームに戻る
+                    </button>
+                    ${!isSaved ? '<p class="text-red-500 mt-3 text-sm">※記録の保存に失敗しました。</p>' : ''}
+                </div>
+            `;
+            document.getElementById('backToHomeButton').addEventListener('click', () => {
+                displayScreen(Screen.HOME);
+            });
+        }
+
+        // --- 8. アプリの起動 ---
+        initializeFirebase();
+
+        // ページロード時の初期画面
+        document.addEventListener('DOMContentLoaded', () => {
+             // 認証完了時に画面は切り替わるため、ここではローディング状態を表示
+             screenContainer.innerHTML = '<div class="text-center p-10"><p class="text-gray-500">アプリを起動しています...</p></div>';
+        });
+
+    </script>
+</body>
+</html>
