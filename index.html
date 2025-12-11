@@ -192,7 +192,10 @@
                 
                 if (error.code === 'auth/configuration-not-found') {
                     // auth/configuration-not-found の場合は、ドメイン登録または設定値の不一致を指摘
-                    errorMessage = `認証エラー: 'authDomain' または Firebase プロジェクトの設定が正しくありません。`;
+                    errorMessage = `認証エラー: 'authDomain' の設定が不正、またはアプリ実行環境のドメインがFirebaseに登録されていません。`;
+                } else if (error.code === 'auth/admin-restricted-operation') {
+                    // auth/admin-restricted-operation の場合は、Authentication機能の無効化を指摘
+                    errorMessage = `認証エラー: Firebaseコンソールで'Authentication'が有効化されていません。匿名認証を有効化してください。`;
                 } else if (error.code === 'auth/api-key-not-valid' || error.message.includes('api-key-not-valid')) {
                     errorMessage = `認証エラー: APIキーが無効です。FIREBASE_CONFIGを確認してください。`;
                 }
