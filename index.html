@@ -19,6 +19,23 @@
             padding-top: 2rem;
             padding-bottom: 2rem;
         }
+        /* 正解時のアニメーション用スタイル */
+        @keyframes correct-flash {
+            0% { transform: scale(1); opacity: 1; background-color: #22c55e; }
+            50% { transform: scale(1.1); opacity: 0.8; background-color: #4ade80; }
+            100% { transform: scale(1); opacity: 1; background-color: #22c55e; }
+        }
+        .flash-correct {
+            animation: correct-flash 0.3s ease-out;
+        }
+        /* ポップアップのアニメーションを強化 */
+        .animate-bounce {
+            animation: bounce 0.6s infinite alternate;
+        }
+        @keyframes bounce {
+            from { transform: translateY(0); }
+            to { transform: translateY(-10px); }
+        }
     </style>
 </head>
 <body class="bg-gray-50">
@@ -38,6 +55,14 @@
                 ユーザーID: <span class="font-mono text-gray-500 text-[10px]" id="displayUserId"></span>
             </p>
         </div>
+        
+        <!-- 全体通知用コンテナ (結果表示の上にかぶせる) -->
+        <div id="notificationOverlay" class="fixed inset-0 bg-black bg-opacity-30 z-50 hidden flex justify-center items-center pointer-events-none">
+            <div id="celebrationMessage" class="bg-white p-8 rounded-2xl shadow-2xl text-center transform scale-150 transition-transform duration-500 pointer-events-auto opacity-0" style="min-width: 300px;">
+                <!-- メッセージ内容がここに入る -->
+            </div>
+        </div>
+
 
         <!-- 画面コンテナ -->
         <div id="screenContainer">
@@ -55,10 +80,28 @@
         // デバッグログを有効にする
         setLogLevel('Debug');
 
-        // グローバル変数の定義と初期化
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
-        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        // =========================================================================
+        // 【重要】Firebase 設定情報 - GitHub Pages 公開用
+        // =========================================================================
+        // GitHub Pages で動かすためには、以下の 'YOUR_...' の部分を
+        // 実際にあなたが Firebase で取得した情報に置き換えてください。
+        // =========================================================================
+        const FIREBASE_CONFIG = {
+  apiKey : "AIzaSyDQzOvJbWVS2HIPauMq5VXlLZrY_WvaEEw" , 
+  authDomain : "math-app-kuriagari.firebaseapp.com" , 
+  projectId : "math-app-kuriagari" , 
+  storageBucket : "math-app-kuriagari.firebasestorage.app" , 
+  messagingSenderId : "159625997232" , 
+  appId : "1:159625997232:web:07e57c805d7045f84f8475" , 
+  measurementId : "G-NTSYR8ZCSR" 
+};
+        // =========================================================================
+        
+        // 以下の定数を使って、設定がプレースホルダーのままかどうかをチェックします。
+        // apiKeyがプレースホルダー文字列の残骸を含んでいるか、または空文字列でないかをチェック
+        const IS_PLACEHOLDER_CONFIG = FIREBASE_CONFIG.apiKey.includes('****************') || FIREBASE_CONFIG.apiKey.length < 30;
+
+        const appId = FIREBASE_CONFIG.projectId || 'default-app-id';
 
         let db, auth;
         let userId = null;
@@ -72,6 +115,9 @@
         const displayUserIdElement = document.getElementById('displayUserId');
         const currentHandleNameElement = document.getElementById('currentHandleName');
         const currentUserIdElement = document.getElementById('currentUserId');
+        const notificationOverlay = document.getElementById('notificationOverlay');
+        const celebrationMessage = document.getElementById('celebrationMessage');
+
 
         // アプリの状態
         let startTime;
@@ -87,26 +133,26 @@
 
         // --- 1. Firebase初期化と認証 ---
         async function initializeFirebase() {
-            if (!firebaseConfig) {
-                console.error("Firebase config is missing.");
-                authStatusElement.textContent = "エラー: Firebase設定がありません";
+            
+            if (IS_PLACEHOLDER_CONFIG) {
+                authStatusElement.textContent = "❗エラー: Firebase設定情報が未設定です。記録は保存/読み込みされません。";
+                // 設定がない場合はサインイン処理をスキップ
+                isAuthReady = true;
+                displayScreen(Screen.REGISTER);
                 return;
             }
 
             try {
-                const app = initializeApp(firebaseConfig);
+                // ここでinitializeAppを実行し、authオブジェクトを取得する
+                const app = initializeApp(FIREBASE_CONFIG);
                 db = getFirestore(app);
                 auth = getAuth(app);
 
                 authStatusElement.textContent = "認証中...";
 
-                // 認証トークンがあれば使用し、なければ匿名認証
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
-
+                // 外部環境ではカスタム認証トークンは使用しない。匿名認証に切り替える。
+                await signInAnonymously(auth);
+                
                 // 認証状態の監視
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
@@ -141,7 +187,17 @@
 
             } catch (error) {
                 console.error("Firebase初期化または認証エラー:", error);
-                authStatusElement.textContent = `認証エラー: ${error.code}`;
+                
+                let errorMessage = `認証エラー: ${error.code}`;
+                
+                if (error.code === 'auth/configuration-not-found') {
+                    // auth/configuration-not-found の場合は、ドメイン登録または設定値の不一致を指摘
+                    errorMessage = `認証エラー: 'authDomain' または Firebase プロジェクトの設定が正しくありません。`;
+                } else if (error.code === 'auth/api-key-not-valid' || error.message.includes('api-key-not-valid')) {
+                    errorMessage = `認証エラー: APIキーが無効です。FIREBASE_CONFIGを確認してください。`;
+                }
+
+                authStatusElement.textContent = errorMessage;
             }
         }
 
@@ -150,7 +206,8 @@
             REGISTER: 'register',
             HOME: 'home',
             PRACTICE: 'practice',
-            RESULT: 'result'
+            RESULT: 'result',
+            LEADERBOARD: 'leaderboard'
         };
 
         function displayScreen(screenName, data = null) {
@@ -168,6 +225,9 @@
                 case Screen.RESULT:
                     renderResultScreen(data);
                     break;
+                case Screen.LEADERBOARD:
+                    renderLeaderboardScreen();
+                    break;
             }
         }
 
@@ -175,12 +235,13 @@
 
         // プライベートな設定ドキュメントの参照を取得
         function getUserProfileDocRef(uid) {
+            // Firestoreパスは /artifacts/{appId}/users/{userId}/user_profile/settings
             return doc(db, 'artifacts', appId, 'users', uid, USER_PROFILE_COLLECTION, USER_PROFILE_DOC_ID);
         }
 
         // ハンドルネームの読み込み
         async function loadUserProfile() {
-            if (!userId) return;
+            if (!userId || !isAuthReady) return;
             try {
                 const docRef = getUserProfileDocRef(userId);
                 const docSnap = await getDoc(docRef);
@@ -196,7 +257,7 @@
 
         // ハンドルネームの保存
         async function saveHandleName(newHandleName) {
-            if (!userId) return;
+            if (!userId || !isAuthReady) return;
             try {
                 const docRef = getUserProfileDocRef(userId);
                 await setDoc(docRef, { handleName: newHandleName });
@@ -215,14 +276,20 @@
 
         // パブリックな記録コレクションの参照を取得
         function getPublicRecordsCollectionRef() {
+            // Firestoreパスは /artifacts/{appId}/public/data/addition_records
             return collection(db, 'artifacts', appId, 'public', 'data', PUBLIC_RECORDS_COLLECTION);
         }
 
         // 新しい練習記録の保存
         async function saveRecord(score, time) {
             if (!isAuthReady || !userId || !handleName) return;
+            if (IS_PLACEHOLDER_CONFIG) {
+                console.warn("Firebase設定が未設定のため、記録は保存されませんでした。");
+                return false;
+            }
 
-            const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+            // DateオブジェクトからYYYY-MM-DD形式を正しく取得
+            const today = new Date().toISOString().slice(0, 10); 
             
             const recordData = {
                 userId: userId,
@@ -230,7 +297,7 @@
                 score: score, // 今回は常に4
                 time: parseFloat(time.toFixed(2)),
                 timestamp: Timestamp.now(),
-                date: today
+                date: today // 修正後の日付
             };
 
             try {
@@ -249,6 +316,11 @@
         // 記録の読み込みとベストタイムの計算
         async function loadRecordsAndDisplay() {
             if (!isAuthReady) return;
+            if (IS_PLACEHOLDER_CONFIG) {
+                console.warn("Firebase設定が未設定のため、記録は読み込まれません。");
+                updateBestTimesDisplay(); // UIを初期値で更新
+                return;
+            }
             try {
                 // すべての記録を読み込む
                 const q = query(getPublicRecordsCollectionRef());
@@ -315,6 +387,33 @@
             if (dbuElement) {
                 dbuElement.textContent = dailyBestUser !== null ? ` by ${dailyBestUser}` : '';
             }
+        }
+        
+        // ベストタイムの計算関数を、ランキング表示用に拡張
+        function getLeaderboardData() {
+            // 全記録をタイム昇順でソート
+            const sortedRecords = [...records].sort((a, b) => a.time - b.time);
+
+            // ユニークなユーザーIDのセットを作成し、各ユーザーのベストタイムのみを抽出
+            const bestRecords = new Map();
+            sortedRecords.forEach(record => {
+                // 同じユーザーIDであれば、最初に出てきた記録（＝最速）のみを保持
+                if (!bestRecords.has(record.userId)) {
+                    bestRecords.set(record.userId, record);
+                }
+            });
+
+            // Mapの値を配列に戻し、再度タイムでソートしてランキングデータとする
+            const leaderboard = Array.from(bestRecords.values()).sort((a, b) => a.time - b.time);
+            
+            // 日付を整形
+            return leaderboard.map(record => ({
+                rank: 0, // 後で設定
+                handleName: record.handleName,
+                time: record.time.toFixed(2),
+                // FirestoreのTimestampオブジェクトをDateに変換してローカルの日付文字列に変換
+                date: record.timestamp?.toDate().toLocaleDateString('ja-JP') || '---' 
+            }));
         }
 
         // --- 5. 問題生成ロジック ---
@@ -386,7 +485,7 @@
             return (endTime - startTime) / 1000; // 秒を返す
         }
 
-        function nextQuestion() {
+        async function nextQuestion() {
             const inputElement = document.getElementById('answerInput');
             const currentQuestion = questions[currentQuestionIndex];
             const userAnswer = parseInt(inputElement.value.trim());
@@ -402,7 +501,30 @@
 
             // 正誤判定
             if (userAnswer === currentQuestion.answer) {
-                // 正解！
+                // 正解のフィードバックを表示
+                const questionBox = document.getElementById('questionBox');
+                const nextButton = document.getElementById('nextButton');
+                
+                // 正解アニメーションの開始
+                questionBox.classList.add('flash-correct');
+                
+                // ボタンを無効化
+                nextButton.disabled = true;
+                nextButton.textContent = 'せいかい！ 🎉';
+                nextButton.classList.remove('bg-blue-500', 'hover:bg-blue-600');
+                nextButton.classList.add('bg-green-500');
+
+                // わずかな遅延を設けて、アニメーションを見せる
+                await new Promise(resolve => setTimeout(resolve, 350));
+
+                // アニメーションのリセットとボタンの復元
+                questionBox.classList.remove('flash-correct');
+                nextButton.disabled = false;
+                nextButton.textContent = '解答をチェック';
+                nextButton.classList.remove('bg-green-500');
+                nextButton.classList.add('bg-blue-500', 'hover:bg-blue-600');
+                
+                // 次の問題へ
                 currentQuestionIndex++;
                 inputElement.value = '';
                 
@@ -442,7 +564,7 @@
 
         // --- 7. UI描画関数 (各画面) ---
 
-        // 通知メッセージの表示
+        // 通知メッセージの表示 (簡易版)
         function showNotification(message, type = 'success') {
             const feedback = document.getElementById('feedbackMessage');
             if (!feedback) return;
@@ -460,6 +582,33 @@
                 feedback.classList.add('hidden');
             }, 3000);
         }
+        
+        // オーバーレイの特別なメッセージ表示
+        async function showCelebration(icon, title, subtitle) {
+            // 結果画面の描画後、少し待ってからポップアップ
+            await new Promise(resolve => setTimeout(resolve, 50));
+
+            notificationOverlay.classList.remove('hidden');
+            celebrationMessage.innerHTML = `
+                <div class="text-7xl mb-4 animate-bounce">${icon}</div>
+                <h3 class="text-3xl font-extrabold text-pink-600 mb-2">${title}</h3>
+                <p class="text-lg text-gray-700">${subtitle}</p>
+            `;
+            // アニメーション開始
+            celebrationMessage.classList.remove('scale-150', 'opacity-0');
+            celebrationMessage.classList.add('scale-100', 'opacity-100');
+
+            // 2.5秒後に自動で非表示
+            await new Promise(resolve => setTimeout(resolve, 2500));
+
+            // アニメーション終了
+            celebrationMessage.classList.remove('scale-100', 'opacity-100');
+            celebrationMessage.classList.add('scale-150', 'opacity-0');
+
+            await new Promise(resolve => setTimeout(resolve, 500));
+            notificationOverlay.classList.add('hidden');
+        }
+
 
         // 登録画面
         function renderRegisterScreen() {
@@ -527,6 +676,11 @@
                         🔥 練習スタート (4問)
                     </button>
                     
+                    <!-- 記録一覧ボタンを追加 -->
+                    <button id="leaderboardButton" class="mt-4 w-full py-3 bg-indigo-500 hover:bg-indigo-600 text-white text-lg font-bold rounded-xl transition duration-300 shadow-lg transform hover:scale-[1.02]">
+                        📊 記録一覧を見る
+                    </button>
+                    
                     <button id="changeNameButton" class="mt-4 w-full py-2 text-sm text-gray-500 hover:text-gray-700 transition duration-200">
                         ハンドルネームを変更
                     </button>
@@ -537,6 +691,9 @@
                 currentQuestionIndex = 0;
                 displayScreen(Screen.PRACTICE);
                 startTimer();
+            });
+            document.getElementById('leaderboardButton').addEventListener('click', () => {
+                displayScreen(Screen.LEADERBOARD);
             });
             document.getElementById('changeNameButton').addEventListener('click', () => {
                 displayScreen(Screen.REGISTER);
@@ -556,7 +713,7 @@
                     </div>
 
                     <!-- 問題表示 -->
-                    <div class="flex justify-center items-center space-x-4 mb-8">
+                    <div id="questionBox" class="flex justify-center items-center space-x-4 mb-8 bg-white p-4 rounded-xl border-2 border-transparent">
                         <span id="questionText" class="text-6xl font-extrabold text-gray-900"></span>
                         <input type="number" id="answerInput" class="w-28 p-4 text-4xl text-center border-4 border-blue-400 rounded-xl focus:ring-blue-600 focus:border-blue-600 shadow-lg transition duration-200" placeholder="答え" inputmode="numeric">
                     </div>
@@ -595,36 +752,43 @@
             // 記録を先に保存
             const isSaved = await saveRecord(score, time);
             
-            const { personalBest, dailyBest, dailyBestUser } = getBestTimes();
-            
+            // 記録保存の`await`が完了しているので、再度`getBestTimes`を呼び出して最新のベストを確認
+            const newBestTimes = getBestTimes();
+            // isPersonalBestとisDailyBestの判定ロジックを修正し、最新のベストタイムと比較
+            const isPersonalBest = newBestTimes.personalBest !== null && time <= newBestTimes.personalBest;
+            // dailyBestUserが自分自身で、かつタイムがデイリーベストと同じか速い場合
+            const isDailyBest = newBestTimes.dailyBest !== null && time <= newBestTimes.dailyBest && newBestTimes.dailyBestUser === handleName;
+
             // 達成状況をチェック
             let messageTitle = 'お疲れ様でした！';
             let messageBody = `4問を**${time.toFixed(2)}秒**でクリア！`;
             let messageIcon = '👍';
-
-            let isPersonalBest = personalBest === null || time < personalBest;
-            // デイリーベスト更新チェック (デイリーベストの記録者が自分、かつ、現在のタイムがその日のベストと同じかより速い場合)
-            let isDailyBest = dailyBest === null || (time <= dailyBest && dailyBestUser === handleName);
-
-            // ローカルに保存されているレコードを更新し、改めてベストタイムを取得
-            // 記録保存の`await`が完了しているので、再度`getBestTimes`を呼び出して最新のベストを確認
-            const newBestTimes = getBestTimes();
-            isPersonalBest = newBestTimes.personalBest !== null && time <= newBestTimes.personalBest;
-            isDailyBest = newBestTimes.dailyBest !== null && time <= newBestTimes.dailyBest && newBestTimes.dailyBestUser === handleName;
-
-
-            if (isPersonalBest && isDailyBest) {
-                messageTitle = '🎉 Wベスト達成！おめでとう！ 🎉';
-                messageBody = `<span class="text-xl">すごすぎる！個人の最高記録と今日の最高記録を同時に更新したよ！</span>`;
-                messageIcon = '🌟👑';
-            } else if (isPersonalBest) {
-                messageTitle = '👑 自己ベスト更新！おめでとう！ 👑';
-                messageBody = `<span class="text-xl">やったね！君の今までの記録を塗り替えたよ！</span>`;
-                messageIcon = '🚀';
-            } else if (isDailyBest) {
-                messageTitle = '🏆 今日のトップスコア！ 🏆';
-                messageBody = `<span class="text-xl">クラスで一番速いタイムだよ！みんなに自慢しよう！</span>`;
-                messageIcon = '🥇';
+            
+            // スコアが4点（100点）であり、かつベストタイムを更新した場合に、お祝いのメッセージを表示
+            if (score === 4) { // 100点の場合
+                if (isPersonalBest && isDailyBest) {
+                    showCelebration('🌟👑', '💯 Wベスト達成！おめでとう！', '個人の最高記録と今日の最高記録を同時に更新したよ！');
+                    messageTitle = '🎉 Wベスト達成！おめでとう！ 🎉';
+                    messageBody = `<span class="text-xl">すごすぎる！最高のタイムでダブルベスト更新！</span>`;
+                    messageIcon = '🌟👑';
+                } else if (isPersonalBest) {
+                    showCelebration('🚀', '💯 自己ベスト更新！', 'やったね！最高のタイムで記録を塗り替えたよ！');
+                    messageTitle = '👑 自己ベスト更新！おめでとう！ 👑';
+                    messageBody = `<span class="text-xl">やったね！最高のタイムで記録を塗り替えたよ！</span>`;
+                    messageIcon = '🚀';
+                } else if (isDailyBest) {
+                    showCelebration('🥇', '💯 今日のトップスコア！', '最高のタイムでクラスのトップに立ったよ！');
+                    messageTitle = '🏆 今日のトップスコア！ 🏆';
+                    messageBody = `<span class="text-xl">最高のタイムでクラスのトップに立ったよ！</span>`;
+                    messageIcon = '🥇';
+                } else {
+                    // 100点だがベスト更新ではない場合も、特別に祝福
+                    messageTitle = '🎉 100点満点！すごい！ 🎉';
+                    messageBody = `<span class="text-xl">全問正解！完璧な解答でした！次はタイム更新だ！</span>`;
+                    messageIcon = '💯';
+                    // 100点のメッセージを少しだけポップアップ
+                    showCelebration('💯', '100点満点！', '全問正解おめでとう！');
+                }
             }
             
             screenContainer.innerHTML = `
@@ -649,6 +813,72 @@
                 displayScreen(Screen.HOME);
             });
         }
+        
+        // 記録一覧画面 (LEADERBOARD) を追加
+        function renderLeaderboardScreen() {
+            const leaderboardData = getLeaderboardData();
+
+            let listItems = '';
+            if (leaderboardData.length > 0) {
+                listItems = leaderboardData.map((record, index) => {
+                    const rank = index + 1;
+                    let rankDisplay = rank;
+                    let rankClass = 'text-gray-600';
+                    let highlight = '';
+
+                    if (rank === 1) {
+                        rankDisplay = '🥇';
+                        rankClass = 'text-yellow-600 font-extrabold';
+                        highlight = 'bg-yellow-50 border-yellow-300';
+                    } else if (rank === 2) {
+                        rankDisplay = '🥈';
+                        rankClass = 'text-gray-500 font-extrabold';
+                        highlight = 'bg-gray-100 border-gray-300';
+                    } else if (rank === 3) {
+                        rankDisplay = '🥉';
+                        rankClass = 'text-amber-700 font-extrabold';
+                        highlight = 'bg-amber-100 border-amber-300';
+                    }
+                    
+                    if (record.handleName === handleName && record.time === getBestTimes().personalBest?.toFixed(2)) {
+                        highlight = highlight ? `${highlight} ring-2 ring-red-400` : 'bg-red-50 border-red-300 ring-2 ring-red-400';
+                    }
+
+                    return `
+                        <li class="flex justify-between items-center p-3 rounded-lg border-b last:border-b-0 transition duration-150 ${highlight}">
+                            <div class="flex items-center space-x-4">
+                                <span class="text-xl w-8 text-center ${rankClass}">${rankDisplay}</span>
+                                <div>
+                                    <p class="text-lg font-semibold text-gray-800">${record.handleName}</p>
+                                    <p class="text-xs text-gray-500">記録日: ${record.date}</p>
+                                </div>
+                            </div>
+                            <span class="text-2xl font-mono font-bold text-indigo-600">${record.time} 秒</span>
+                        </li>
+                    `;
+                }).join('');
+            } else {
+                listItems = '<li class="text-center text-gray-500 py-8">まだ記録がありません。一番乗りを目指そう！</li>';
+            }
+
+            screenContainer.innerHTML = `
+                <div class="p-4">
+                    <h2 class="text-2xl font-bold mb-6 text-indigo-700 text-center">🏆 クラス総合ランキング (ベストタイム)</h2>
+                    
+                    <ul class="bg-white rounded-xl shadow-lg border border-indigo-100 divide-y divide-gray-200">
+                        ${listItems}
+                    </ul>
+                    
+                    <button id="backFromLeaderboard" class="mt-8 w-full py-3 bg-blue-500 hover:bg-blue-600 text-white text-lg font-bold rounded-xl transition duration-200 shadow-lg">
+                        ホームに戻る
+                    </button>
+                </div>
+            `;
+            document.getElementById('backFromLeaderboard').addEventListener('click', () => {
+                displayScreen(Screen.HOME);
+            });
+        }
+
 
         // --- 8. アプリの起動 ---
         initializeFirebase();
